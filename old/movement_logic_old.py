@@ -5,15 +5,12 @@ import threading
 
 MQTT_BROKER = "127.0.0.1"
 TOLERANCE = 30
-ANGLE_TOLERANCE = 5.0 # Degrees of allowed drift
 
 class DroneLogic:
     def __init__(self):
         self.state = "STANDBY"
-        self.current_yaw = 0.0
-        self.locked_target_yaw = 0.0
+        self.target_angle = 0.0
         self.is_moving = False
-        
         self.tower_fire_detected = False
         self.gyro_active = False
         
@@ -30,19 +27,9 @@ class DroneLogic:
 
     def execute_forward_burst(self):
         self.is_moving = True
-        print("[LOGIC] ALIGNED. Emitting FORWARD for 0.5s...")
-        self.client.publish("gcs/ui_state", json.dumps({"status": "SEARCHING", "dir_x": "NONE", "dir_y": "FORWARD"}))
+        print("[LOGIC] Emitting FORWARD for 0.5s...")
         time.sleep(0.5)
         print("[LOGIC] Emitting STOP. Waiting for next image...")
-        self.client.publish("gcs/ui_state", json.dumps({"status": "SEARCHING", "dir_x": "NONE", "dir_y": "NONE"}))
-        self.is_moving = False
-
-    def execute_align_burst(self, direction):
-        self.is_moving = True
-        print(f"[LOGIC] Off-course. Aligning {direction}...")
-        self.client.publish("gcs/ui_state", json.dumps({"status": "ADJUSTING", "dir_x": direction, "dir_y": "NONE"}))
-        time.sleep(0.2) # Short burst to fix heading
-        self.client.publish("gcs/ui_state", json.dumps({"status": "SEARCHING", "dir_x": "NONE", "dir_y": "NONE"}))
         self.is_moving = False
 
     def check_start_condition(self):
@@ -50,7 +37,7 @@ class DroneLogic:
             self.state = "SEARCHING"
             print("\n[LOGIC] System Armed! Commencing search protocol.")
             self.client.publish("gcs/ui_state", json.dumps({
-                "status": "SEARCHING", "dir_x": "NONE", "dir_y": "NONE", 
+                "status": "SEARCHING", "dir_x": "NONE", "dir_y": "FORWARD", 
                 "cx": -1, "cy": -1, "w": 160, "h": 120, "locked": False
             }))
 
@@ -60,22 +47,17 @@ class DroneLogic:
 
         if topic == "cmd/target_angle":
             try:
-                target_angle_relative = float(payload)
-                self.locked_target_yaw = self.current_yaw + target_angle_relative
+                self.target_angle = float(payload)
                 self.tower_fire_detected = True
-                print(f"[LOGIC] Tower Fire verified. Target Absolute Yaw locked to: {self.locked_target_yaw:.1f}°")
+                print(f"[LOGIC] Tower Fire verified. Target Angle: {self.target_angle}")
                 self.check_start_condition()
             except: pass
 
         elif topic == "telemetry/imu":
-            try:
-                data = json.loads(payload)
-                self.current_yaw = data['yaw']
-                if not self.gyro_active:
-                    self.gyro_active = True
-                    print("[LOGIC] Gyro telemetry established with ESP32.")
-                    self.check_start_condition()
-            except: pass
+            if not self.gyro_active:
+                self.gyro_active = True
+                print("[LOGIC] Gyro telemetry established with ESP32.")
+                self.check_start_condition()
 
         elif topic == "vision/yolo_coords":
             if self.state == "STANDBY": return 
@@ -93,14 +75,9 @@ class DroneLogic:
                     }))
                 else:
                     if self.is_moving: return 
-                    
-                    # Drone checks compass before allowing forward movement
-                    yaw_error = self.current_yaw - self.locked_target_yaw
-                    if abs(yaw_error) > ANGLE_TOLERANCE:
-                        direction = "LEFT" if yaw_error > 0 else "RIGHT"
-                        threading.Thread(target=self.execute_align_burst, args=(direction,)).start()
-                    else:
-                        threading.Thread(target=self.execute_forward_burst).start()
+                    dir_turn = "RIGHT" if self.target_angle > 0 else "LEFT"
+                    print(f"[LOGIC] No Fire. Adjusting angle: {dir_turn}")
+                    threading.Thread(target=self.execute_forward_burst).start()
             except: pass
 
         elif topic == "vision/edge_coords" and self.state == "LOCKING":
@@ -119,7 +96,7 @@ class DroneLogic:
                 else:
                     dir_x = "RIGHT" if dx > 0 else "LEFT"
                     dir_y = "BACK" if dy > 0 else "FORWARD"
-                    self.client.publish("gcs/ui_state", json.dumps({"status": "ADJUSTING", "dir_x": dir_x, "dir_y": dir_y, "cx": cx, "cy": cy, "w": w, "h": h}))
+                    self.client.publish("gcs/ui_state", json.dumps({"status": "ADJUSTING", "cx": cx, "cy": cy, "w": w, "h": h}))
             except: pass
 
 if __name__ == "__main__":
